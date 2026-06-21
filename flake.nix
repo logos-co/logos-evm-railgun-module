@@ -16,12 +16,15 @@
     # provider (all chain reads) + the proxied bundler submit (`raw_rpc_url`);
     # `keystore_module` signs the relayer's userOp/7702 digests (`sign_digest`,
     # EOA key stays in keystore). `follows` keeps the same module-builder.
+    #
+    # TEMPORARY: pinned to the feature commits that carry `raw_rpc_url` /
+    # `sign_digest` (eth-rpc#4 / keystore#4). Revert to plain URLs once those merge.
     eth_rpc_module = {
-      url = "github:logos-co/logos-evm-eth-rpc-module";
+      url = "github:logos-co/logos-evm-eth-rpc-module/a4b2b284409f796ab35961aeafbd91cc81dadc4c";
       inputs.logos-module-builder.follows = "logos-module-builder";
     };
     keystore_module = {
-      url = "github:logos-co/logos-evm-keystore-module";
+      url = "github:logos-co/logos-evm-keystore-module/620ec1780f1b7c02eab323409039379d46216e3e";
       inputs.logos-module-builder.follows = "logos-module-builder";
     };
   };
