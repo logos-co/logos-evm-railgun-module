@@ -16,6 +16,7 @@
   },
   "nix": {
     "rust": {
+      "toolchain": "1.96.0",
       "packages": {
         "build": ["cmake", "pkg-config", "rustPlatform.bindgenHook"],
         "runtime": []
