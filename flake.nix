@@ -10,15 +10,12 @@
 
     # Dependency modules — their published `.lidl`s drive the generated typed
     # `modules().<dep>` clients. `eth_rpc_module` backs the engine's Eip1193
-    # provider (all chain reads) + the proxied bundler submit (`raw_rpc_url`);
-    # `keystore_module` signs the relayer's userOp/7702 digests (`sign_digest`,
-    # EOA key stays in keystore). `follows` keeps the same module-builder.
-    #
-    # TEMPORARY: eth_rpc_module is pinned to the feature commit that carries
-    # `raw_rpc_url` (eth-rpc#4, still open); revert to a plain URL once it merges.
-    # keystore's `sign_digest` landed on main (keystore#4) — plain URL again.
+    # provider (all chain reads) + the proxied bundler submit (`raw_rpc_url`,
+    # eth-rpc#4); `keystore_module` signs the relayer's userOp/7702 digests
+    # (`sign_digest`, keystore#4, EOA key stays in keystore). Both landed on
+    # main → plain URLs. `follows` keeps the same module-builder.
     eth_rpc_module = {
-      url = "github:logos-co/logos-evm-eth-rpc-module/a4b2b284409f796ab35961aeafbd91cc81dadc4c";
+      url = "github:logos-co/logos-evm-eth-rpc-module";
       inputs.logos-module-builder.follows = "logos-module-builder";
     };
     keystore_module = {

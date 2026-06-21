@@ -7,17 +7,16 @@
         ]
       },
       "locked": {
-        "lastModified": 1782041979,
+        "lastModified": 1782056851,
         "narHash": "sha256-QJo+CAyfN7jtkvV284HRtQuqPDompbIC2ecuThv4xrQ=",
         "owner": "logos-co",
         "repo": "logos-evm-eth-rpc-module",
-        "rev": "a4b2b284409f796ab35961aeafbd91cc81dadc4c",
+        "rev": "bf08ea99ae65a2c999bdc2f7511fa5b05f690936",
         "type": "github"
       },
       "original": {
         "owner": "logos-co",
         "repo": "logos-evm-eth-rpc-module",
-        "rev": "a4b2b284409f796ab35961aeafbd91cc81dadc4c",
         "type": "github"
       }
     },
