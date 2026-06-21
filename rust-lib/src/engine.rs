@@ -11,6 +11,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use alloy::primitives::Address;
+use eip_1193_provider::provider::Eip1193Provider;
 use railgun::account::address::RailgunAddress;
 use railgun::account::chain::ChainId;
 use railgun::account::signer::{PrivateKeySigner, RailgunSigner};
@@ -18,6 +19,9 @@ use railgun::builder::RailgunBuilder;
 use railgun::caip::AssetId;
 use railgun::chain_config::ChainConfig;
 use railgun::provider::RailgunProvider;
+use url::Url;
+use userop_kit::bundler::pimlico::PimlicoBundler;
+use userop_kit::smart_account::simple_smart_account::SimpleSmartAccount;
 
 use crate::db_adapter::DiskDatabase;
 use crate::keys;
@@ -29,6 +33,11 @@ pub struct RailgunEngine {
     address: RailgunAddress,
     /// Held so transfer/unshield can sign their proofs. Never leaves the module.
     signer: Arc<PrivateKeySigner>,
+    /// The chain-read seam, kept so the 4337 relayer can build a `SimpleSmartAccount`.
+    eip1193: Arc<dyn Eip1193Provider>,
+    chain_id: u64,
+    /// The only fee token `prepare_userop` accepts (the chain's wrapped base token).
+    wrapped_base_token: Address,
 }
 
 /// Parse a `0x…`/bare ERC-20 token address into an `AssetId`.
@@ -52,14 +61,16 @@ impl RailgunEngine {
     ) -> Result<Self, String> {
         let chain = ChainConfig::from_chain_id(chain_id)
             .ok_or_else(|| format!("unsupported chain id {chain_id} (mainnet + Sepolia only)"))?;
+        let wrapped_base_token = chain.wrapped_base_token;
 
         let signer = keys::make_signer(spending_hex, viewing_hex, ChainId::evm(chain_id))?;
         let address = signer.address();
 
-        let eip1193 = Arc::new(EthRpcEip1193::new(backend));
+        // One adapter, shared by the engine builder and the 4337 smart account.
+        let eip1193: Arc<dyn Eip1193Provider> = Arc::new(EthRpcEip1193::new(backend));
         let db = Arc::new(DiskDatabase::new(data_dir)?);
 
-        let mut builder = RailgunBuilder::new(chain, eip1193).with_database(db);
+        let mut builder = RailgunBuilder::new(chain, eip1193.clone()).with_database(db);
         if poi {
             builder = builder.with_poi();
         }
@@ -69,7 +80,7 @@ impl RailgunEngine {
             .await
             .map_err(|e| format!("register signer: {e}"))?;
 
-        Ok(Self { provider, address, signer })
+        Ok(Self { provider, address, signer, eip1193, chain_id, wrapped_base_token })
     }
 
     /// The public `0zk1…` address (safe to expose over IPC).
@@ -148,6 +159,70 @@ impl RailgunEngine {
             .map_err(|e| format!("prove unshield: {e}"))?;
         serde_json::to_string(&proved.tx_data).map_err(|e| e.to_string())
     }
+
+    /// RELAYED private send (the ERC-4337 broadcaster path — hides the sender EOA).
+    ///
+    /// Routes by recipient form: a `0zk…` recipient → private transfer (no fee), a
+    /// `0x…` recipient → unshield (engine adds the unshield fee). Either way the
+    /// resulting RAILGUN transaction is wrapped into a 7702 `UserOperation` paid for
+    /// out of the shielded pool (the in-module railgun signer authorizes a fee note
+    /// to the privacy paymaster) and routed through `bundler_url`, so the public
+    /// sender is the bundler — not `owner_address`'s EOA.
+    ///
+    /// Returns the **unsigned** [`SignableUserOperation`] as JSON. The smart-account
+    /// owner (`owner_address`) still has to sign its `userOpHash` (via keystore) and
+    /// the signed op is submitted to the bundler — both live in the backend, since
+    /// the EOA key is keystore's and submission is a plain bundler RPC.
+    ///
+    /// Needs a live bundler + chain (the fee estimate iterates against both); there
+    /// is no offline path. `fee_token` is fixed to the chain's wrapped base token
+    /// (the only token `prepare_userop` accepts today).
+    pub async fn prepare_relayed_send(
+        &mut self,
+        to: &str,
+        asset: &str,
+        value: u128,
+        memo: &str,
+        owner_address: &str,
+        bundler_url: &str,
+    ) -> Result<String, String> {
+        let asset = parse_asset(asset)?;
+        let from = self.signer.clone() as Arc<dyn RailgunSigner>;
+
+        // Build the underlying RAILGUN transaction (transfer for 0zk, unshield for 0x).
+        let builder = if to.starts_with("0zk") {
+            let to = RailgunAddress::from_str(to).map_err(|e| format!("bad 0zk address: {e}"))?;
+            self.provider.transact().transfer(from, to, asset, value, memo)
+        } else {
+            let to = Address::from_str(to).map_err(|e| format!("bad recipient address: {e}"))?;
+            self.provider
+                .transact()
+                .unshield(from, to, asset, value)
+                .map_err(|e| format!("build unshield: {e}"))?
+        };
+
+        let owner = Address::from_str(owner_address).map_err(|e| format!("bad owner address: {e}"))?;
+        let url = Url::parse(bundler_url).map_err(|e| format!("bad bundler url {bundler_url:?}: {e}"))?;
+        let bundler = PimlicoBundler::new(url);
+        let smart_account = SimpleSmartAccount::new(owner, self.chain_id, self.eip1193.clone());
+        let fee_payer = self.signer.clone() as Arc<dyn RailgunSigner>;
+
+        let signable = self
+            .provider
+            .prepare_userop(
+                builder,
+                &bundler,
+                &smart_account,
+                fee_payer,
+                self.wrapped_base_token,
+                // No extra smart-account calls; the RAILGUN txs ride in the paymaster data.
+                Vec::new(),
+                &mut rand::rng(),
+            )
+            .await
+            .map_err(|e| format!("prepare userop: {e}"))?;
+        serde_json::to_string(&signable).map_err(|e| e.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -209,6 +284,26 @@ mod tests {
             assert!(tx.get("to").is_some() && tx.get("data").is_some() && tx.get("value").is_some());
         }
         assert_eq!(*backend.0.lock().unwrap(), 0, "shield must not touch the network");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn prepare_relayed_send_validates_args_offline() {
+        let dir = std::env::temp_dir().join(format!("railgun-relay-{}", std::process::id()));
+        let backend = Arc::new(NoNetBackend(Mutex::new(0)));
+        let mut engine = RailgunEngine::init(11155111, backend.clone(), SPENDING, VIEWING, &dir, false)
+            .await
+            .unwrap();
+        let usdc = "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238";
+        let to_0zk = engine.zk_address(); // a 0zk recipient → transfer route (no network to build)
+        // A malformed bundler URL is rejected before any chain/bundler I/O — this
+        // exercises the full relayer wiring (build → smart account → bundler) offline.
+        let res = engine
+            .prepare_relayed_send(&to_0zk, usdc, 1, "", "0x0000000000000000000000000000000000000001", "not a url")
+            .await;
+        let e = res.expect_err("malformed bundler url must error");
+        assert!(e.contains("bad bundler url"), "got {e}");
+        assert_eq!(*backend.0.lock().unwrap(), 0, "arg validation must not touch the network");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

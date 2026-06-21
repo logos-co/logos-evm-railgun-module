@@ -14,8 +14,14 @@ crate-type = ["staticlib", "rlib"]
 # RAILGUN engine (railgun-rs) + its EIP-1193 provider trait, consumed as git deps.
 railgun = { git = "https://github.com/ethereum/kohaku" }
 eip-1193-provider = { git = "https://github.com/ethereum/kohaku" }
+# ERC-4337 relayer path (the private-send broadcaster): SimpleSmartAccount (7702)
+# + PimlicoBundler, used by `prepare_relayed_send`.
+userop-kit = { git = "https://github.com/ethereum/kohaku" }
 
 alloy = { version = "1.8", default-features = false }
+# `reqwest::Url` is the bundler-URL type PimlicoBundler::new takes; the `url`
+# crate is its re-export — one version in the tree unifies the types.
+url = "2"
 async-trait = "0.1.89"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

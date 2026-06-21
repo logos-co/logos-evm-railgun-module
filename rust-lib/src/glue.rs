@@ -51,6 +51,13 @@ pub trait RailgunModule: 'static {
     /// UNSHIELD (private → public 0x): `{ "to": "0x…", "asset", "amount" }`
     /// → `{ ok, tx: TxData }` (Groth16-proven; engine adds the unshield fee).
     fn prepare_unshield(&mut self, params_json: String) -> String;
+    /// RELAYED private send (ERC-4337 — hides the sender): `{ "to": "0zk…"|"0x…",
+    /// "asset", "amount", "memo"?, "owner": "0x…", "bundlerUrl": "https://…" }`
+    /// → `{ ok, userOp: SignableUserOperation }`. Routes 0zk→transfer / 0x→unshield,
+    /// wraps it in a 7702 UserOp paid from the shielded pool. The op is returned
+    /// **unsigned** — the backend signs `owner`'s userOpHash (keystore) and submits
+    /// to the bundler. Needs a live bundler + chain (no offline path).
+    fn prepare_relayed_send(&mut self, params_json: String) -> String;
 
     fn on_context_ready(&mut self, _ctx: &RustModuleContext) {}
 }
@@ -133,6 +140,17 @@ struct UnshieldParams {
     to: String,
     asset: String,
     amount: String,
+}
+#[derive(Deserialize)]
+struct RelayedSendParams {
+    to: String,
+    asset: String,
+    amount: String,
+    #[serde(default)]
+    memo: String,
+    owner: String,
+    #[serde(rename = "bundlerUrl")]
+    bundler_url: String,
 }
 
 fn parse_amount(s: &str) -> Result<u128, String> {
@@ -255,6 +273,35 @@ impl RailgunModule for RailgunModuleImpl {
         match self.engine.as_mut() {
             Some(e) => match block_on(e.prepare_unshield(&p.to, &p.asset, amount)) {
                 Ok(tx) => json!({ "ok": true, "tx": serde_json::from_str::<Value>(&tx).unwrap_or(Value::Null) }).to_string(),
+                Err(e) => err(e),
+            },
+            None => err("railgun_module not initialized (call init first)"),
+        }
+    }
+
+    fn prepare_relayed_send(&mut self, params_json: String) -> String {
+        let p: RelayedSendParams = match serde_json::from_str(&params_json) {
+            Ok(p) => p,
+            Err(e) => return err(format!("bad relayed-send params: {e}")),
+        };
+        let amount = match parse_amount(&p.amount) {
+            Ok(v) => v,
+            Err(e) => return err(e),
+        };
+        match self.engine.as_mut() {
+            Some(e) => match block_on(e.prepare_relayed_send(
+                &p.to,
+                &p.asset,
+                amount,
+                &p.memo,
+                &p.owner,
+                &p.bundler_url,
+            )) {
+                Ok(op) => json!({
+                    "ok": true,
+                    "userOp": serde_json::from_str::<Value>(&op).unwrap_or(Value::Null)
+                })
+                .to_string(),
                 Err(e) => err(e),
             },
             None => err("railgun_module not initialized (call init first)"),
