@@ -21,6 +21,7 @@ use railgun::chain_config::ChainConfig;
 use railgun::provider::RailgunProvider;
 use url::Url;
 use userop_kit::bundler::pimlico::PimlicoBundler;
+use userop_kit::signable_user_operation::SignableUserOperation;
 use userop_kit::smart_account::simple_smart_account::SimpleSmartAccount;
 
 use crate::db_adapter::DiskDatabase;
@@ -160,7 +161,13 @@ impl RailgunEngine {
         serde_json::to_string(&proved.tx_data).map_err(|e| e.to_string())
     }
 
-    /// RELAYED private send (the ERC-4337 broadcaster path — hides the sender EOA).
+    /// The chain id this engine was built for (for the relayer's smart account + submit).
+    pub fn chain_id(&self) -> u64 {
+        self.chain_id
+    }
+
+    /// PREPARE the RELAYED private send (the ERC-4337 broadcaster path — hides the
+    /// sender EOA) up to, but not including, signing.
     ///
     /// Routes by recipient form: a `0zk…` recipient → private transfer (no fee), a
     /// `0x…` recipient → unshield (engine adds the unshield fee). Either way the
@@ -169,15 +176,17 @@ impl RailgunEngine {
     /// to the privacy paymaster) and routed through `bundler_url`, so the public
     /// sender is the bundler — not `owner_address`'s EOA.
     ///
-    /// Returns the **unsigned** [`SignableUserOperation`] as JSON. The smart-account
-    /// owner (`owner_address`) still has to sign its `userOpHash` (via keystore) and
-    /// the signed op is submitted to the bundler — both live in the backend, since
-    /// the EOA key is keystore's and submission is a plain bundler RPC.
+    /// Returns the **unsigned** [`SignableUserOperation`]. The glue then signs it
+    /// with a keystore-bridge `Signer` (so the EOA key stays in keystore) and
+    /// submits the signed op to the bundler through `eth_rpc.raw_rpc_url` (proxied).
+    /// We return the struct rather than JSON because the EIP-712 signing hash is
+    /// private to userop-kit — only `SignableUserOperation::sign` can produce it —
+    /// so the sign step can't be split across the IPC boundary.
     ///
     /// Needs a live bundler + chain (the fee estimate iterates against both); there
     /// is no offline path. `fee_token` is fixed to the chain's wrapped base token
     /// (the only token `prepare_userop` accepts today).
-    pub async fn prepare_relayed_send(
+    pub async fn prepare_relayed_userop(
         &mut self,
         to: &str,
         asset: &str,
@@ -185,7 +194,7 @@ impl RailgunEngine {
         memo: &str,
         owner_address: &str,
         bundler_url: &str,
-    ) -> Result<String, String> {
+    ) -> Result<SignableUserOperation, String> {
         let asset = parse_asset(asset)?;
         let from = self.signer.clone() as Arc<dyn RailgunSigner>;
 
@@ -207,8 +216,7 @@ impl RailgunEngine {
         let smart_account = SimpleSmartAccount::new(owner, self.chain_id, self.eip1193.clone());
         let fee_payer = self.signer.clone() as Arc<dyn RailgunSigner>;
 
-        let signable = self
-            .provider
+        self.provider
             .prepare_userop(
                 builder,
                 &bundler,
@@ -220,8 +228,7 @@ impl RailgunEngine {
                 &mut rand::rng(),
             )
             .await
-            .map_err(|e| format!("prepare userop: {e}"))?;
-        serde_json::to_string(&signable).map_err(|e| e.to_string())
+            .map_err(|e| format!("prepare userop: {e}"))
     }
 }
 
@@ -288,7 +295,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prepare_relayed_send_validates_args_offline() {
+    async fn prepare_relayed_userop_validates_args_offline() {
         let dir = std::env::temp_dir().join(format!("railgun-relay-{}", std::process::id()));
         let backend = Arc::new(NoNetBackend(Mutex::new(0)));
         let mut engine = RailgunEngine::init(11155111, backend.clone(), SPENDING, VIEWING, &dir, false)
@@ -297,13 +304,14 @@ mod tests {
         let usdc = "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238";
         let to_0zk = engine.zk_address(); // a 0zk recipient → transfer route (no network to build)
         // A malformed bundler URL is rejected before any chain/bundler I/O — this
-        // exercises the full relayer wiring (build → smart account → bundler) offline.
+        // exercises the relayer wiring (build → smart account → bundler) offline.
         let res = engine
-            .prepare_relayed_send(&to_0zk, usdc, 1, "", "0x0000000000000000000000000000000000000001", "not a url")
+            .prepare_relayed_userop(&to_0zk, usdc, 1, "", "0x0000000000000000000000000000000000000001", "not a url")
             .await;
         let e = res.expect_err("malformed bundler url must error");
         assert!(e.contains("bad bundler url"), "got {e}");
         assert_eq!(*backend.0.lock().unwrap(), 0, "arg validation must not touch the network");
+        assert_eq!(engine.chain_id(), 11155111);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

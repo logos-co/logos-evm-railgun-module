@@ -4,11 +4,17 @@
   inputs = {
     logos-module-builder.url = "github:logos-co/logos-module-builder";
 
-    # Dependency module — its published `.lidl` drives the generated
-    # `modules().eth_rpc_module` client used for all chain reads (the engine's
-    # Eip1193 provider is backed by it). `follows` keeps the same module-builder.
+    # Dependency modules — their published `.lidl`s drive the generated typed
+    # `modules().<dep>` clients. `eth_rpc_module` backs the engine's Eip1193
+    # provider (all chain reads) + the proxied bundler submit (`raw_rpc_url`);
+    # `keystore_module` signs the relayer's userOp/7702 digests (`sign_digest`,
+    # EOA key stays in keystore). `follows` keeps the same module-builder.
     eth_rpc_module = {
       url = "github:logos-co/logos-evm-eth-rpc-module";
+      inputs.logos-module-builder.follows = "logos-module-builder";
+    };
+    keystore_module = {
+      url = "github:logos-co/logos-evm-keystore-module";
       inputs.logos-module-builder.follows = "logos-module-builder";
     };
   };

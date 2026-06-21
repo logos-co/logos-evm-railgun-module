@@ -4,7 +4,7 @@
   "description": "RAILGUN private transactions (shield / private transfer / unshield) for the EVM wallet — wraps the native railgun-rs engine. Sepolia-first; UNAUDITED upstream.",
   "type": "core",
   "category": "evm-wallet",
-  "dependencies": ["eth_rpc_module"],
+  "dependencies": ["eth_rpc_module", "keystore_module"],
   "concurrency": "single",
   "interface": "cdylib",
   "codegen": {

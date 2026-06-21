@@ -18,7 +18,8 @@ eip-1193-provider = { git = "https://github.com/ethereum/kohaku" }
 # + PimlicoBundler, used by `prepare_relayed_send`.
 userop-kit = { git = "https://github.com/ethereum/kohaku" }
 
-alloy = { version = "1.8", default-features = false }
+# `signers` re-exports the `Signer` trait we implement for the keystore bridge.
+alloy = { version = "1.8", default-features = false, features = ["signers"] }
 # `reqwest::Url` is the bundler-URL type PimlicoBundler::new takes; the `url`
 # crate is its re-export — one version in the tree unifies the types.
 url = "2"

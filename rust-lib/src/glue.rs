@@ -23,8 +23,12 @@
 
 use std::future::Future;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 
+use alloy::primitives::{Address, ChainId, Signature, B256};
+use alloy::signers::{Error as SignerError, Result as SignerResult, Signer};
+use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -53,11 +57,12 @@ pub trait RailgunModule: 'static {
     fn prepare_unshield(&mut self, params_json: String) -> String;
     /// RELAYED private send (ERC-4337 — hides the sender): `{ "to": "0zk…"|"0x…",
     /// "asset", "amount", "memo"?, "owner": "0x…", "bundlerUrl": "https://…" }`
-    /// → `{ ok, userOp: SignableUserOperation }`. Routes 0zk→transfer / 0x→unshield,
-    /// wraps it in a 7702 UserOp paid from the shielded pool. The op is returned
-    /// **unsigned** — the backend signs `owner`'s userOpHash (keystore) and submits
-    /// to the bundler. Needs a live bundler + chain (no offline path).
-    fn prepare_relayed_send(&mut self, params_json: String) -> String;
+    /// → `{ ok, userOpHash }`. Routes 0zk→transfer / 0x→unshield, wraps it in a 7702
+    /// UserOp paid from the shielded pool, signs it with `owner`'s key **via
+    /// keystore** (`sign_digest`, key never leaves keystore), and submits the op to
+    /// `bundlerUrl` **through eth_rpc** (`raw_rpc_url`, proxied — the bundler never
+    /// sees the user's IP). Needs a live bundler + chain (no offline path).
+    fn relayed_send(&mut self, params_json: String) -> String;
 
     fn on_context_ready(&mut self, _ctx: &RustModuleContext) {}
 }
@@ -90,6 +95,52 @@ impl RpcBackend for EthRpcBackend {
             return Err(v.get("error").and_then(Value::as_str).unwrap_or("eth_rpc failed").to_string());
         }
         v.get("result").cloned().ok_or_else(|| "eth_rpc: missing result".to_string())
+    }
+}
+
+// ── keystore-bridge signer (the EOA owner of the 7702 smart account) ─────────
+
+/// An alloy [`Signer`] that signs by calling `modules().keystore_module.sign_digest`
+/// over IPC, so the EOA private key never enters this module. Used by
+/// [`SignableUserOperation::sign`](userop_kit::signable_user_operation::SignableUserOperation)
+/// to sign the relayer's userOp hash (and its 7702 authorization hash) — both
+/// raw 32-byte digests the keystore signs without an EIP-191/712 prefix.
+struct KeystoreBridgeSigner {
+    owner: Address,
+    chain_id: u64,
+}
+
+#[async_trait]
+impl Signer for KeystoreBridgeSigner {
+    async fn sign_hash(&self, hash: &B256) -> SignerResult<Signature> {
+        let resp = modules()
+            .keystore_module
+            .sign_digest(&self.owner.to_string(), &format!("0x{hash:x}"))
+            .map_err(|e| SignerError::other(e.to_string()))?;
+        let v: Value = serde_json::from_str(&resp).map_err(|e| SignerError::other(e.to_string()))?;
+        if v.get("ok").and_then(Value::as_bool) != Some(true) {
+            let msg = v.get("error").and_then(Value::as_str).unwrap_or("sign_digest failed");
+            return Err(SignerError::other(msg.to_string()));
+        }
+        let sig_hex = v
+            .get("signature")
+            .and_then(Value::as_str)
+            .ok_or_else(|| SignerError::other("sign_digest: no signature"))?;
+        let bytes = hex::decode(sig_hex.trim_start_matches("0x"))
+            .map_err(|e| SignerError::other(e.to_string()))?;
+        Signature::try_from(bytes.as_slice()).map_err(|e| SignerError::other(e.to_string()))
+    }
+
+    fn address(&self) -> Address {
+        self.owner
+    }
+    fn chain_id(&self) -> Option<ChainId> {
+        Some(self.chain_id)
+    }
+    fn set_chain_id(&mut self, chain_id: Option<ChainId>) {
+        if let Some(c) = chain_id {
+            self.chain_id = c;
+        }
     }
 }
 
@@ -279,7 +330,7 @@ impl RailgunModule for RailgunModuleImpl {
         }
     }
 
-    fn prepare_relayed_send(&mut self, params_json: String) -> String {
+    fn relayed_send(&mut self, params_json: String) -> String {
         let p: RelayedSendParams = match serde_json::from_str(&params_json) {
             Ok(p) => p,
             Err(e) => return err(format!("bad relayed-send params: {e}")),
@@ -288,24 +339,56 @@ impl RailgunModule for RailgunModuleImpl {
             Ok(v) => v,
             Err(e) => return err(e),
         };
-        match self.engine.as_mut() {
-            Some(e) => match block_on(e.prepare_relayed_send(
-                &p.to,
-                &p.asset,
-                amount,
-                &p.memo,
-                &p.owner,
-                &p.bundler_url,
-            )) {
-                Ok(op) => json!({
-                    "ok": true,
-                    "userOp": serde_json::from_str::<Value>(&op).unwrap_or(Value::Null)
-                })
-                .to_string(),
-                Err(e) => err(e),
-            },
-            None => err("railgun_module not initialized (call init first)"),
+        let owner = match Address::from_str(&p.owner) {
+            Ok(a) => a,
+            Err(e) => return err(format!("bad owner address: {e}")),
+        };
+        let engine = match self.engine.as_mut() {
+            Some(e) => e,
+            None => return err("railgun_module not initialized (call init first)"),
+        };
+        let chain_id = engine.chain_id() as i64;
+
+        // 1) Prepare the unsigned 7702 UserOperation (iterates against the bundler).
+        let signable = match block_on(engine.prepare_relayed_userop(
+            &p.to,
+            &p.asset,
+            amount,
+            &p.memo,
+            &p.owner,
+            &p.bundler_url,
+        )) {
+            Ok(s) => s,
+            Err(e) => return err(e),
+        };
+
+        // 2) Sign it (userOp hash + 7702 auth hash) with the owner's key via keystore.
+        let bridge = KeystoreBridgeSigner { owner, chain_id: chain_id as u64 };
+        let signed = match block_on(signable.sign(&bridge)) {
+            Ok(s) => s,
+            Err(e) => return err(format!("sign userop: {e}")),
+        };
+
+        // 3) Submit to the bundler through eth_rpc (proxied) — params are the
+        //    `eth_sendUserOperation` tuple `[userOp, entryPoint]`.
+        let params = match serde_json::to_string(&(&signed.user_op, &signed.entry_point)) {
+            Ok(s) => s,
+            Err(e) => return err(format!("encode userop: {e}")),
+        };
+        let resp = match modules().eth_rpc_module.raw_rpc_url(
+            chain_id,
+            &p.bundler_url,
+            "eth_sendUserOperation",
+            &params,
+        ) {
+            Ok(r) => r,
+            Err(e) => return err(format!("bundler submit: {e}")),
+        };
+        let v: Value = serde_json::from_str(&resp).unwrap_or(Value::Null);
+        if v.get("ok").and_then(Value::as_bool) != Some(true) {
+            return err(v.get("error").and_then(Value::as_str).unwrap_or("bundler submit failed"));
         }
+        json!({ "ok": true, "userOpHash": v.get("result").cloned().unwrap_or(Value::Null) }).to_string()
     }
 }
 
