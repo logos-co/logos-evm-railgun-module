@@ -20,6 +20,26 @@
         "type": "github"
       }
     },
+    "keystore_module": {
+      "inputs": {
+        "logos-module-builder": [
+          "logos-module-builder"
+        ]
+      },
+      "locked": {
+        "lastModified": 1781991101,
+        "narHash": "sha256-spEWDsCyIuTxE2ngn30P+ABcHWzgOeXE/K7gWuVOyOc=",
+        "owner": "logos-co",
+        "repo": "logos-evm-keystore-module",
+        "rev": "59e60e7f9f3ecd0bc032b637f9abd0e5cf38bf77",
+        "type": "github"
+      },
+      "original": {
+        "owner": "logos-co",
+        "repo": "logos-evm-keystore-module",
+        "type": "github"
+      }
+    },
     "logos-capability-module": {
       "inputs": {
         "logos-module-builder": "logos-module-builder_2"
@@ -8050,6 +8070,7 @@
     "root": {
       "inputs": {
         "eth_rpc_module": "eth_rpc_module",
+        "keystore_module": "keystore_module",
         "logos-module-builder": "logos-module-builder"
       }
     }
