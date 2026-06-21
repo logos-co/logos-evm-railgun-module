@@ -4278,7 +4278,6 @@ dependencies = [
  "alloy",
  "async-trait",
  "eip-1193-provider",
- "futures",
  "hex",
  "logos-rust-sdk",
  "railgun",

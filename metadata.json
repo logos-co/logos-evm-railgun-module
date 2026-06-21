@@ -5,7 +5,7 @@
   "type": "core",
   "category": "evm-wallet",
   "dependencies": ["eth_rpc_module"],
-  "concurrency": "multi",
+  "concurrency": "single",
   "interface": "cdylib",
   "codegen": {
     "rust": {

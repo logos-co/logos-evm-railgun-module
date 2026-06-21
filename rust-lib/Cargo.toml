@@ -24,7 +24,6 @@ hex = "0.4"
 # the engine's outbound `modules().eth_rpc_module` IPC runs on the dispatch
 # worker thread (which carries the Qt event loop under concurrency:multi).
 tokio = { version = "1", features = ["rt", "time", "net", "io-util", "macros"] }
-futures = "0.3"
 
 # Provided by logos-module-builder at build time (staged into ../logos-rust-sdk-src).
 logos-rust-sdk = { path = "../logos-rust-sdk-src", optional = true }
