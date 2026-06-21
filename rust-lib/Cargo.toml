@@ -1,0 +1,41 @@
+[package]
+name = "railgun_module"
+version = "0.1.0"
+edition = "2021"
+description = "Logos RAILGUN module — private transactions (shield / private transfer / unshield) for the EVM wallet, wrapping the native railgun-rs engine."
+rust-version = "1.85"
+
+[workspace]
+resolver = "3"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+# RAILGUN engine (railgun-rs) + its EIP-1193 provider trait, consumed as git deps.
+railgun = { git = "https://github.com/ethereum/kohaku" }
+eip-1193-provider = { git = "https://github.com/ethereum/kohaku" }
+
+alloy = { version = "1.8", default-features = false }
+async-trait = "0.1.89"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+# The engine is async; the glue drives it on a per-call current-thread runtime so
+# the engine's outbound `modules().eth_rpc_module` IPC runs on the dispatch
+# worker thread (which carries the Qt event loop under concurrency:multi).
+tokio = { version = "1", features = ["rt", "time", "net", "io-util", "macros"] }
+futures = "0.3"
+
+# Provided by logos-module-builder at build time (staged into ../logos-rust-sdk-src).
+logos-rust-sdk = { path = "../logos-rust-sdk-src", optional = true }
+
+[features]
+default = ["logos_module"]
+logos_module = ["dep:logos-rust-sdk"]
+
+# The engine pins forks of these via the kohaku workspace; an out-of-tree
+# consumer must replicate the patch so the dep graph resolves identically.
+[patch.crates-io]
+ruint = { git = "https://github.com/Robert-MacWha/ruint" }
+ark-circom = { git = "https://github.com/Robert-MacWha/circom-compat", branch = "release/0.6.0" }

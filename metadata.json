@@ -1,0 +1,28 @@
+{
+  "name": "railgun_module",
+  "version": "0.1.0",
+  "description": "RAILGUN private transactions (shield / private transfer / unshield) for the EVM wallet — wraps the native railgun-rs engine. Sepolia-first; UNAUDITED upstream.",
+  "type": "core",
+  "category": "evm-wallet",
+  "dependencies": ["eth_rpc_module"],
+  "concurrency": "multi",
+  "interface": "cdylib",
+  "codegen": {
+    "rust": {
+      "crate": "rust-lib",
+      "trait": "RailgunModule",
+      "source": "src/glue.rs"
+    }
+  },
+  "nix": {
+    "rust": {
+      "packages": {
+        "build": ["cmake", "pkg-config", "rustPlatform.bindgenHook"],
+        "runtime": []
+      }
+    },
+    "external_libraries": [],
+    "packages": { "build": [], "runtime": [] },
+    "cmake": { "find_packages": [], "extra_include_dirs": [] }
+  }
+}
