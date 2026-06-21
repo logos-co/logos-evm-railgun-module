@@ -4281,6 +4281,7 @@ dependencies = [
  "hex",
  "logos-rust-sdk",
  "railgun",
+ "rand 0.9.4",
  "serde",
  "serde_json",
  "tokio",

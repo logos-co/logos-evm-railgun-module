@@ -42,6 +42,15 @@ pub trait RailgunModule: 'static {
     fn sync(&mut self) -> String;
     /// Shielded balance per asset (`{ ok, balances: [BalanceEntry] }`).
     fn get_shielded_balance(&mut self) -> String;
+    /// SHIELD (deposit public → private): `{ "asset": "0x…", "amount": "decimal" }`
+    /// → `{ ok, txs: [TxData] }` for the caller to approve+sign+send. No proof.
+    fn prepare_shield(&mut self, params_json: String) -> String;
+    /// Private TRANSFER (0zk → 0zk): `{ "to": "0zk…", "asset", "amount", "memo"? }`
+    /// → `{ ok, tx: TxData }` (Groth16-proven). No fee.
+    fn prepare_transfer(&mut self, params_json: String) -> String;
+    /// UNSHIELD (private → public 0x): `{ "to": "0x…", "asset", "amount" }`
+    /// → `{ ok, tx: TxData }` (Groth16-proven; engine adds the unshield fee).
+    fn prepare_unshield(&mut self, params_json: String) -> String;
 
     fn on_context_ready(&mut self, _ctx: &RustModuleContext) {}
 }
@@ -105,6 +114,31 @@ struct InitParams {
     poi: bool,
 }
 
+// Amounts are decimal strings (u128 wei exceeds JSON's safe-integer range).
+#[derive(Deserialize)]
+struct ShieldParams {
+    asset: String,
+    amount: String,
+}
+#[derive(Deserialize)]
+struct TransferParams {
+    to: String,
+    asset: String,
+    amount: String,
+    #[serde(default)]
+    memo: String,
+}
+#[derive(Deserialize)]
+struct UnshieldParams {
+    to: String,
+    asset: String,
+    amount: String,
+}
+
+fn parse_amount(s: &str) -> Result<u128, String> {
+    s.parse::<u128>().map_err(|e| format!("bad amount {s:?}: {e}"))
+}
+
 impl RailgunModule for RailgunModuleImpl {
     fn on_context_ready(&mut self, ctx: &RustModuleContext) {
         self.persist_dir = Some(PathBuf::from(&ctx.instance_persistence_path));
@@ -163,6 +197,64 @@ impl RailgunModule for RailgunModuleImpl {
                     "balances": serde_json::from_str::<Value>(&j).unwrap_or(Value::Null)
                 })
                 .to_string(),
+                Err(e) => err(e),
+            },
+            None => err("railgun_module not initialized (call init first)"),
+        }
+    }
+
+    fn prepare_shield(&mut self, params_json: String) -> String {
+        let p: ShieldParams = match serde_json::from_str(&params_json) {
+            Ok(p) => p,
+            Err(e) => return err(format!("bad shield params: {e}")),
+        };
+        let amount = match parse_amount(&p.amount) {
+            Ok(v) => v,
+            Err(e) => return err(e),
+        };
+        match self.engine.as_ref() {
+            Some(e) => match block_on(e.prepare_shield(&p.asset, amount)) {
+                Ok(txs) => json!({
+                    "ok": true,
+                    "txs": serde_json::from_str::<Value>(&txs).unwrap_or(Value::Null)
+                })
+                .to_string(),
+                Err(e) => err(e),
+            },
+            None => err("railgun_module not initialized (call init first)"),
+        }
+    }
+
+    fn prepare_transfer(&mut self, params_json: String) -> String {
+        let p: TransferParams = match serde_json::from_str(&params_json) {
+            Ok(p) => p,
+            Err(e) => return err(format!("bad transfer params: {e}")),
+        };
+        let amount = match parse_amount(&p.amount) {
+            Ok(v) => v,
+            Err(e) => return err(e),
+        };
+        match self.engine.as_mut() {
+            Some(e) => match block_on(e.prepare_transfer(&p.to, &p.asset, amount, &p.memo)) {
+                Ok(tx) => json!({ "ok": true, "tx": serde_json::from_str::<Value>(&tx).unwrap_or(Value::Null) }).to_string(),
+                Err(e) => err(e),
+            },
+            None => err("railgun_module not initialized (call init first)"),
+        }
+    }
+
+    fn prepare_unshield(&mut self, params_json: String) -> String {
+        let p: UnshieldParams = match serde_json::from_str(&params_json) {
+            Ok(p) => p,
+            Err(e) => return err(format!("bad unshield params: {e}")),
+        };
+        let amount = match parse_amount(&p.amount) {
+            Ok(v) => v,
+            Err(e) => return err(e),
+        };
+        match self.engine.as_mut() {
+            Some(e) => match block_on(e.prepare_unshield(&p.to, &p.asset, amount)) {
+                Ok(tx) => json!({ "ok": true, "tx": serde_json::from_str::<Value>(&tx).unwrap_or(Value::Null) }).to_string(),
                 Err(e) => err(e),
             },
             None => err("railgun_module not initialized (call init first)"),
