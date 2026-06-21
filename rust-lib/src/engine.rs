@@ -84,6 +84,21 @@ impl RailgunEngine {
         Ok(Self { provider, address, signer, eip1193, chain_id, wrapped_base_token })
     }
 
+    /// Build the engine deriving its railgun keys from an opaque `seed` (a
+    /// deterministic EOA signature relayed from keystore) instead of explicit hex
+    /// keys — see [`keys::derive_keys_from_seed`]. The derived spending/viewing
+    /// keys are produced and held entirely inside this module.
+    pub async fn init_from_seed<B: RpcBackend>(
+        chain_id: u64,
+        backend: Arc<B>,
+        seed: &[u8],
+        data_dir: &Path,
+        poi: bool,
+    ) -> Result<Self, String> {
+        let (spending_hex, viewing_hex) = keys::derive_keys_from_seed(seed);
+        Self::init(chain_id, backend, &spending_hex, &viewing_hex, data_dir, poi).await
+    }
+
     /// The public `0zk1…` address (safe to expose over IPC).
     pub fn zk_address(&self) -> String {
         self.address.to_string()

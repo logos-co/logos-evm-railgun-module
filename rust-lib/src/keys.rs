@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use alloy::primitives::keccak256;
 use railgun::account::chain::ChainId;
 use railgun::account::signer::{PrivateKeySigner, RailgunSigner};
 use railgun::crypto::keys::{HexKey, SpendingKey, ViewingKey};
@@ -43,6 +44,23 @@ pub fn derive_zk_address(
     chain: ChainId,
 ) -> Result<String, String> {
     Ok(make_signer(spending_hex, viewing_hex, chain)?.address().to_string())
+}
+
+/// Deterministically derive railgun spending + viewing keys (as hex) from an
+/// opaque `seed` — typically a *deterministic* EOA signature obtained from
+/// `keystore_module.sign_message` over a fixed message. keccak256 domain
+/// separation makes the two keys independent; railgun reduces each 32-byte value
+/// into its curve scalar on use, so any seed yields a valid key pair.
+///
+/// This binds the railgun wallet to the EOA: the same EOA always reproduces the
+/// same seed → same `0zk` address, so funds are recoverable as long as the user
+/// controls the EOA. ⚠️ It is NOT the RAILGUN-Community canonical BIP-32
+/// derivation, so funds are not recoverable in a third-party RAILGUN wallet;
+/// canonical-recovery derivation is a follow-up.
+pub fn derive_keys_from_seed(seed: &[u8]) -> (String, String) {
+    let spend = keccak256([seed, b"logos-railgun/spend/v1"].concat());
+    let view = keccak256([seed, b"logos-railgun/view/v1"].concat());
+    (hex::encode(spend), hex::encode(view))
 }
 
 /// Convenience: the chain binding for an EVM chain id, or the chain-agnostic
@@ -83,5 +101,19 @@ mod tests {
     #[test]
     fn rejects_bad_key() {
         assert!(derive_zk_address("notahexkey", VIEWING, ChainId::All).is_err());
+    }
+
+    #[test]
+    fn seed_derivation_is_deterministic_and_valid() {
+        // A fixed "EOA signature" seed → a stable, valid 0zk address.
+        let seed = b"deterministic eoa signature bytes (fixed for the test)";
+        let (sk, vk) = derive_keys_from_seed(seed);
+        let addr1 = derive_zk_address(&sk, &vk, ChainId::All).expect("derived keys must be valid");
+        assert!(addr1.starts_with("0zk1"), "got {addr1}");
+        // Same seed → same address (recoverable); different seed → different address.
+        let (sk2, vk2) = derive_keys_from_seed(seed);
+        assert_eq!((&sk, &vk), (&sk2, &vk2));
+        let (sk3, _) = derive_keys_from_seed(b"a different seed");
+        assert_ne!(sk, sk3);
     }
 }

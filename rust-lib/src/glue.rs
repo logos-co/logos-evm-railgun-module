@@ -40,6 +40,11 @@ pub trait RailgunModule: 'static {
     /// "poi": bool }`. Imports the railgun keys (held in-module), builds the
     /// engine for the chain, and returns `{ ok, address }` (the `0zk` address).
     fn init(&mut self, params_json: String) -> String;
+    /// Like [`Self::init`] but derives the railgun keys from a `seed` (a
+    /// deterministic EOA signature from keystore) rather than explicit keys:
+    /// `{ "chainId": u64, "seed": hex, "poi": bool }` → `{ ok, address }`. The
+    /// derived spending/viewing keys are produced and held in-module.
+    fn init_from_seed(&mut self, params_json: String) -> String;
     /// The public `0zk1…` RAILGUN address (`{ ok, address }`).
     fn get_zk_address(&mut self) -> String;
     /// Sync UTXO/TXID (and POI, if enabled) state to the latest block.
@@ -172,6 +177,16 @@ struct InitParams {
     poi: bool,
 }
 
+#[derive(Deserialize)]
+struct InitFromSeedParams {
+    #[serde(rename = "chainId")]
+    chain_id: u64,
+    /// An opaque seed (hex) — a deterministic EOA signature from keystore.
+    seed: String,
+    #[serde(default)]
+    poi: bool,
+}
+
 // Amounts are decimal strings (u128 wei exceeds JSON's safe-integer range).
 #[derive(Deserialize)]
 struct ShieldParams {
@@ -232,6 +247,30 @@ impl RailgunModule for RailgunModuleImpl {
             &dir,
             p.poi,
         )) {
+            Ok(engine) => {
+                let addr = engine.zk_address();
+                self.engine = Some(engine);
+                json!({ "ok": true, "address": addr }).to_string()
+            }
+            Err(e) => err(e),
+        }
+    }
+
+    fn init_from_seed(&mut self, params_json: String) -> String {
+        let p: InitFromSeedParams = match serde_json::from_str(&params_json) {
+            Ok(p) => p,
+            Err(e) => return err(format!("bad init-from-seed params: {e}")),
+        };
+        let seed = match hex::decode(p.seed.trim_start_matches("0x")) {
+            Ok(b) => b,
+            Err(e) => return err(format!("bad seed hex: {e}")),
+        };
+        let dir = match &self.persist_dir {
+            Some(d) => d.join(format!("chain-{}", p.chain_id)),
+            None => return err("railgun_module not initialized (context not ready)"),
+        };
+        let backend = Arc::new(EthRpcBackend { chain_id: p.chain_id as i64 });
+        match block_on(RailgunEngine::init_from_seed(p.chain_id, backend, &seed, &dir, p.poi)) {
             Ok(engine) => {
                 let addr = engine.zk_address();
                 self.engine = Some(engine);
