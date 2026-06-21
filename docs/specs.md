@@ -178,6 +178,23 @@ nix build .#default \
 lm methods ./result/lib/railgun_module_plugin.dylib   # 9 invokables
 ```
 
+### Offline doc-test (end-to-end against `logoscore`)
+
+`doctests/railgun-module-runtime.test.yaml` is an executable doc-test (run via the
+shared [`logos-doctest`](https://github.com/logos-co/logos-doctest) CLI). It builds
+this module's `.lgx` **and its `eth_rpc`/`keystore` dependency `.lgx`**, installs all
+three with `lgpm`, loads `railgun_module` in a `logoscore` daemon (deps auto-resolve),
+and drives the **offline** surface — `init` (build + register the Sepolia engine),
+`get_zk_address`, and `prepare_shield` (unsigned `TxData`) — none of which touch the
+network. Proving, `sync`, and the relayer need a live chain + bundler and are out of
+scope for the offline test.
+
+```bash
+( cd doctests && ./run.sh )   # runs every *.test.yaml + regenerates outputs/*.md
+# or a single spec:
+nix run github:logos-co/logos-doctest -- run doctests/railgun-module-runtime.test.yaml --verbose
+```
+
 `metadata.json` highlights: `interface: cdylib`, `concurrency: single`,
 `dependencies: [eth_rpc_module, keystore_module]`, `nix.rust.toolchain: "1.96.0"`,
 `nix.rust.packages.build: [cmake, pkg-config, rustPlatform.bindgenHook]`, and the

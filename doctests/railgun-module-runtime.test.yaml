@@ -1,0 +1,205 @@
+name: "Running the RAILGUN Module Against logoscore"
+output: railgun-module-runtime.md
+release: ""
+
+intro: |
+  `logos-evm-railgun-module` adds **private transactions** to the Logos
+  multi-chain EVM wallet. It wraps the native **railgun-rs** shielded-pool engine
+  (`ethereum/kohaku`): *shield* public ERC-20 into a private pool, *transfer*
+  privately (`0zk → 0zk`, amounts and parties hidden by Groth16 zk-proofs), and
+  *unshield* back to a public `0x` address — with an ERC-4337 relayer path that
+  also hides the sender.
+
+  > ⚠️ **The upstream engine is unaudited and not production-ready.** This module
+  > is **Sepolia-first**; mainnet is gated. Do not move real funds with it.
+
+  The railgun spending/viewing keys are a Groth16 witness, so they live **inside
+  this module** and never cross the IPC boundary — mirroring how `keystore_module`
+  holds the EOA key. Chain reads go through `eth_rpc_module` and relayer submits
+  are proxied; both are declared dependencies.
+
+  This doc-test exercises the module end-to-end through the headless `logoscore`
+  runtime. Everything here is **offline and deterministic** — it builds and
+  registers the engine, derives the public `0zk` address, and builds a shield
+  transaction, none of which touch the network (proving, sync, and the relayer
+  need a live chain + bundler and are out of scope for an offline test):
+
+  1. Build `logoscore` and `lgpm` from their published flakes.
+  2. Build this module's `.lgx` **and its `eth_rpc_module` + `keystore_module`
+     dependencies'** `.lgx`, then install all three.
+  3. Start a `logoscore` daemon, load `railgun_module` (its deps auto-resolve),
+     and drive it: introspect the API, build the engine on Sepolia from known
+     keys, read back the `0zk` address, and prepare a shield transaction.
+
+what_you_build: "This `railgun_module` (plus its `eth_rpc`/`keystore` deps), packaged as `.lgx`, installed with `lgpm`, and called through a `logoscore` daemon."
+
+what_you_learn:
+  - How a Rust cdylib Logos module that wraps a native zk engine is packaged as an installable `.lgx`
+  - How to install a module together with its dependency modules and load it into a `logoscore` daemon
+  - How RAILGUN builds a shielded-pool engine and derives a public `0zk` address offline
+  - How a shield (public → private deposit) is prepared as unsigned `TxData` for the caller to sign
+  - How the railgun keys stay inside the module (only the public `0zk` address and unsigned txs come out)
+
+prerequisites:
+  - |
+    **Nix** with flakes enabled. Install from [nixos.org](https://nixos.org/download.html), then enable flakes:
+
+    ```bash
+    mkdir -p ~/.config/nix
+    echo 'experimental-features = nix-command flakes' >> ~/.config/nix/nix.conf
+    ```
+
+    Verify: `nix flake --help >/dev/null 2>&1 && echo "Flakes enabled"`
+  - "**A Linux or macOS machine.** Every step here is offline."
+
+sections:
+  - title: "Build logoscore and lgpm"
+    step: true
+    text: |
+      `logoscore` is the headless frontend for `logos-liblogos` (it brings in the
+      whole module-runtime stack), and `lgpm` installs `.lgx` packages into a
+      modules directory.
+    steps:
+      - title: "Build logoscore"
+        run: "nix build 'github:logos-co/logos-logoscore-cli#cli' --out-link ./logos"
+        check_file: "logos/bin/logoscore"
+      - title: "Build lgpm"
+        run: "nix build 'github:logos-co/logos-package-manager#cli' -o lgpm"
+        check_file: "lgpm/bin/lgpm"
+
+  - title: "Build and install railgun + its dependencies"
+    step: true
+    text: |
+      `railgun_module` depends on `eth_rpc_module` (chain reads) and
+      `keystore_module` (the relayer's EOA signing). The daemon must have all
+      three installed before it can load railgun, so build each `.lgx` and install
+      them into a local `./modules` directory. The bundled `capability_module`
+      (shipped with `logoscore`) handles the load-time auth handshake, so seed it
+      first.
+
+      > The first build compiles the native railgun engine (zk-proving deps), so
+      > allow a generous timeout.
+    steps:
+      - title: "Build the railgun module's .lgx"
+        run: "nix build 'github:logos-co/logos-evm-railgun-module{release}#lgx' --no-write-lock-file -o railgun-lgx"
+        code_block: |
+          # From inside the clone this is simply: nix build '.#lgx'
+          nix build 'github:logos-co/logos-evm-railgun-module{release}#lgx' -o railgun-lgx
+        extra_run:
+          run: "ls railgun-lgx/*.lgx"
+      - title: "Build the eth_rpc_module dependency .lgx"
+        run: "nix build 'github:logos-co/logos-evm-eth-rpc-module#lgx' --no-write-lock-file -o eth-rpc-lgx"
+        extra_run:
+          run: "ls eth-rpc-lgx/*.lgx"
+      - title: "Build the keystore_module dependency .lgx"
+        run: "nix build 'github:logos-co/logos-evm-keystore-module#lgx' --no-write-lock-file -o keystore-lgx"
+        extra_run:
+          run: "ls keystore-lgx/*.lgx"
+      - title: "Seed the capability module"
+        run: |
+          mkdir -p modules
+          cp -RL ./logos/modules/. ./modules/
+        check_file: "modules/capability_module/manifest.json"
+      - title: "Install all three .lgx with lgpm"
+        run: |
+          ./lgpm/bin/lgpm --modules-dir ./modules --allow-unsigned install --file eth-rpc-lgx/*.lgx
+          ./lgpm/bin/lgpm --modules-dir ./modules --allow-unsigned install --file keystore-lgx/*.lgx
+          ./lgpm/bin/lgpm --modules-dir ./modules --allow-unsigned install --file railgun-lgx/*.lgx
+        expect_contains:
+          - "Installed to:"
+      - title: "Confirm the install"
+        run: "./lgpm/bin/lgpm --modules-dir ./modules list"
+        expect_contains:
+          - "railgun_module"
+          - "eth_rpc_module"
+          - "keystore_module"
+        check_file: "modules/railgun_module/manifest.json"
+
+  - title: "Run the daemon and drive the RAILGUN engine"
+    step: true
+    text: |
+      Start `logoscore` pointed at `./modules` and load `railgun_module` — its
+      `eth_rpc_module` and `keystore_module` dependencies auto-resolve. Then build
+      the engine on **Sepolia** (chain id `11155111`) from a known spending/viewing
+      key pair and read back the public `0zk` address.
+    steps:
+      - title: "Write the engine init config"
+        text: |
+          `init` takes `{ chainId, spendingKey, viewingKey, poi }`. The keys are
+          railgun (not EOA) keys; they are imported into the module and never
+          returned. We use a fixed test pair so the derived `0zk` address is
+          deterministic.
+        file:
+          path: init.json
+          content: |
+            {
+              "chainId": 11155111,
+              "spendingKey": "039b3b11110e49d7340cbe7171791972e3c0d94ef31b18d6ab93d7ace62d278a",
+              "viewingKey": "d345b2cc2f414aa93413b9572fa2b26e0e869e9274b006415a8d62ab1fa2dcb1",
+              "poi": false
+            }
+      - title: "Write the shield request"
+        text: |
+          A shield deposits a public ERC-20 into the shielded pool. `prepare_shield`
+          takes `{ asset, amount }` (amount is a decimal string of base units) and
+          returns the unsigned `TxData[]` for the caller to approve + sign + send.
+        file:
+          path: shield.json
+          content: |
+            {
+              "asset": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
+              "amount": "1000000"
+            }
+      - title: "Start the daemon"
+        run: "sh -c './logos/bin/logoscore -D -m ./modules > logs.txt 2>&1 &'"
+        code_block: "logoscore -D -m ./modules > logs.txt &"
+      - run: "sleep 3"
+      - title: "Load the module (deps auto-resolve)"
+        run: "./logos/bin/logoscore load-module railgun_module"
+        code_block: "logoscore load-module railgun_module"
+        expect_contains:
+          - "railgun_module"
+      - title: "Introspect the module"
+        run: "./logos/bin/logoscore module-info railgun_module"
+        code_block: "logoscore module-info railgun_module"
+        expect_contains:
+          - "init"
+          - "get_zk_address"
+          - "prepare_shield"
+      - title: "Build the engine on Sepolia (offline)"
+        text: |
+          `init` builds and registers the railgun engine for Sepolia and returns
+          the public `0zk` address. This performs **no network I/O** — the engine
+          is constructed and the keys registered entirely in-process.
+        run: "./logos/bin/logoscore call railgun_module init @init.json"
+        code_block: "logoscore call railgun_module init @init.json"
+        expect_contains:
+          - '\"ok\":true'
+          - "0zk1qynw6pq3"
+      - title: "Read the public 0zk address"
+        run: "./logos/bin/logoscore call railgun_module get_zk_address"
+        code_block: "logoscore call railgun_module get_zk_address"
+        expect_contains:
+          - '\"ok\":true'
+          - "0zk1qynw6pq3"
+      - title: "Prepare a shield transaction"
+        text: |
+          `prepare_shield` builds the unsigned deposit calldata — pure `TxData`
+          (`to`/`data`/`value`), no zk-proof and no network. The wallet backend
+          would prepend an ERC-20 `approve`, sign each with `keystore_module`, and
+          broadcast through `eth_rpc_module`.
+        run: "./logos/bin/logoscore call railgun_module prepare_shield @shield.json"
+        code_block: "logoscore call railgun_module prepare_shield @shield.json"
+        expect_contains:
+          - '\"ok\":true'
+          - "txs"
+          - "data"
+      - title: "Stop the daemon"
+        run: "./logos/bin/logoscore stop"
+        code_block: "logoscore stop"
+      - run: "sleep 2"
+      - title: "Confirm the daemon has stopped"
+        run: "./logos/bin/logoscore status || true"
+        code_block: "logoscore status"
+        expect_contains:
+          - '"status":"not_running"'
