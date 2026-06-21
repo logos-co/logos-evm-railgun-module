@@ -3,7 +3,6 @@ name = "railgun_module"
 version = "0.1.0"
 edition = "2021"
 description = "Logos RAILGUN module — private transactions (shield / private transfer / unshield) for the EVM wallet, wrapping the native railgun-rs engine."
-rust-version = "1.85"
 
 [workspace]
 resolver = "3"
